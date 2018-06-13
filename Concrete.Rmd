@@ -1,0 +1,101 @@
+---
+title: "Compressive_Strength_of_Concrete_Mixtures"
+author: "Michael Rose"
+date: "June 12, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(AppliedPredictiveModeling)
+library(caret)
+library(Hmisc)
+library(plyr)
+```
+
+# Load data 
+
+```{r}
+data(concrete)
+str(concrete)
+str(mixtures)
+```
+
+```{r}
+featurePlot(x = concrete[, -9],
+            y = concrete$CompressiveStrength,
+            ## Add some space between the panels
+            between = list(x = 1, y = 1),
+            ## Add a background grid ('g') and a smoother ('smooth'))
+            type = c("g", "p", "smooth"))
+```
+
+```{r}
+# code for averaging the replicated mixtures and splitting the data into training and test set 
+averaged <- ddply(
+  mixtures, 
+  .(Cement, BlastFurnaceSlag, FlyAsh, Water, Superplasticizer, CoarseAggregate, FineAggregate, Age), 
+  function (x) c(CompressiveStrength = mean(x$CompressiveStrength)))
+
+# set seed for reproducibility 
+set.seed(975)
+
+# create partition for CV
+forTraining <- createDataPartition(averaged$CompressiveStrength, p = 3/4)[[1]]
+trainingSet <- averaged[forTraining,]
+testSet <- averaged[-forTraining,]
+```
+
+A specific model formula was created to fit the linear models. In (.)^2 the . is shorthand for all the predictors, and the term expands into a model with all the linear terms and all two-factor interactions.  
+
+```{r}
+modFormula <- paste("CompressiveStrength ~ (.)^2 + I(Cement^2) + ", 
+                    "I(BlastFurnaceSlag^2) + I(FlyAsh^2) + I(Water^2) + ",
+                    "I(Superplasticizer^2) + I(CoarseAggregate^2) +",
+                    "I(FineAggregate^2) + I(Age^2)")
+modFormula <- as.formula(modFormula)
+
+# each model used repeated 10 fold CV and is specified with the trainControl function 
+controlObject <- trainControl(method = "repeatedcv",
+                              repeats = 5, 
+                              number = 10)
+# to create the exact same folds, the RNG is reset to a common seed prior to running train
+
+# to fit the linear regression model 
+set.seed(669)
+(linearReg <- train(modFormula,
+                   data = trainingSet, 
+                   method = "lm",
+                   trControl = controlObject))
+
+```
+
+The output above shows that 8 predictors were used and we got an R^2 value of 0.7980
+```{r} 
+lm_lR <- summary(linearReg)
+lm_lR$r.squared
+```
+
+```{r}
+# The other two linear models 
+set.seed(669)
+
+plsModel <- train(modFormula, data = trainingSet, 
+                  method = "pls",
+                  preProc = c("center", "scale"), 
+                  tuneLength = 15, 
+                  trControl = controlObject)
+
+# elastic net
+enetGrid <- expand.grid(.lambda = c(0, 0.001, 0.01, 0.1), 
+                        .fraction = seq(0.05, 1, length = 20))
+
+set.seed(669)
+enetModel <- train(modFormula, data = trainingSet,
+                   method = "enet",
+                   preProc = c("center", "scale"), 
+                   tuneGrid = enetGrid,
+                   trControl = controlObject)
+
+```
+
