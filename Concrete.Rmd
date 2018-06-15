@@ -96,6 +96,289 @@ enetModel <- train(modFormula, data = trainingSet,
                    preProc = c("center", "scale"), 
                    tuneGrid = enetGrid,
                    trControl = controlObject)
+```
+
+```{r}
+# MARS, neural networks and SVMs 
+set.seed(669)
+
+earthModel <- train(CompressiveStrength ~ ., data = trainingSet, 
+                    method = "earth", 
+                    tuneGrid = expand.grid(.degree = 1,
+                                           .nprune = 2:25), 
+                    trControl = controlObject)
+
+set.seed(669)
+svmRModel <- train(CompressiveStrength ~ ., data = trainingSet, 
+                   method = "svmRadial",
+                   tuneLength = 15,
+                   preProc = c("center", "scale"),
+                   trControl = controlObject)
+
+nnetGrid <- expand.grid(.decay = c(0.001, 0.01, 0.1), 
+                        .size = seq(1, 27, by = 2),
+                        .bag = FALSE)
+
+set.seed(669)
+nnetModel <- train(CompressiveStrength ~ .,
+                   data = trainingSet, 
+                   method = "avNNet",
+                   tuneGrid = nnetGrid, 
+                   preProc = c("center", "scale"),
+                   linout = TRUE,
+                   trace = FALSE, 
+                   maxit = 1000,
+                   trControl = controlObject
+                   )
+```
+
+```{r}
+# create regression and model trees 
+
+set.seed(669)
+rpartModel <- train(CompressiveStrength ~ ., 
+                    data = trainingSet, 
+                    method = "rpart",
+                    tuneLength = 30,
+                    trControl = controlObject)
+
+set.seed(669)
+ctreeModel <- train(CompressiveStrength ~.,
+                    data = trainingSet, 
+                    method = "ctree", 
+                    tuneLength = 10, 
+                    trControl = controlObject)
+
+set.seed(669)
+mtModel <- train(CompressiveStrength ~.,
+                 data = trainingSet,
+                 method = "M5",
+                 trControl = controlObject)
 
 ```
+
+```{r}
+# other models 
+set.seed(669)
+treebagModel <- train(CompressiveStrength ~., 
+                      data = trainingSet,
+                      method = "treebag",
+                      trControl = controlObject)
+
+set.seed(669)
+rfModel <- train(CompressiveStrength ~.,
+                 data = trainingSet, 
+                 method = "rf", 
+                 tuneLength = 10, 
+                 ntrees = 1000,
+                 importance = TRUE, 
+                 trControl = controlObject)
+
+gbmGrid <- expand.grid(.interaction.depth = seq(1, 7, by = 2),
+                       .n.trees = seq(100, 1000, by = 50), 
+                       .shrinkage = c(0.01, 0.1))
+
+set.seed(669)
+gbmModel <- train(CompressiveStrength ~ .,
+                  data = trainingSet, 
+                  method = "gbm",
+                  tuneGrid = gbmGrid, 
+                  verbose = FALSE,
+                  trControl = controlObject)
+
+cubistGrid <- expand.grid(.committees = c(1, 5, 10, 50, 75, 100), 
+                          .neighbors = c(0, 1, 3, 5, 7, 9))
+
+set.seed(669)
+cbModel <- train(CompressiveStrength ~., 
+                 data = trainingSet, 
+                 method = "cubist",
+                 tuneGrid = cubistGrid, 
+                 trControl = controlObject)
+
+```
+
+# Resample 
+
+These were collected into a single object using caret's resamples function.
+
+```{r}
+# resample
+allResamples <- resamples(list("Linear Reg" = lmModel,
+                               "PLS" = plsModel,
+                               "Elastic Net" = enetModel, 
+                               "MARS" = earthModel, 
+                               "SVM" = svmRModel,
+                               "Neural Network" = nnetModel, 
+                               "CART" = rpartModel, 
+                               "Cond Inf Tree" = ctreeModel,
+                               "Bagged Tree" = treebagModel, 
+                               "Boosted Tree" = gbmModel,
+                               "Random Forest" = rfModel,
+                               "Cubist" = cbModel
+                               ))
+
+# Plot the RMSE values 
+parallelplot(allResamples)
+
+# R Squared 
+parallelplot(allResamples, metric = "RSquared")
+```
+
+Other visualizations can be created (?xyplot.resamples)
+
+```{r}
+# test set predictions 
+nnetPredictions <- predict(nnetModel, testData)
+gbmPredictions <- predict(gbmModel, testData)
+cbPredictions <- predict(cbModel, testData)
+
+```
+
+To predict optimal mixtures, we will use the 28 day data to generate a set of random starting points from the training set. Since distances between the formulations will be used as a measure of dissimilarity, the data are preprocessed to have the same mean and variance for each predictor. Afterwards, a single random mixture is selected to initialize the maximum dissimilarity sample process. 
+
+```{r}
+age28Data <- subset(trainingData, Age == 28)
+
+# remove the age and compressive strength columns and then center and scale the predictor columns 
+pp1 <- preProcess(age28Data[, -(8:9)], c("center", "scale"))
+scaledTrain <- predict(pp1, age28Data[, 1:7])
+set.seed(91)
+startMixture <- sample(1:nrow(age28Data), 1)
+starters <- scaledTrain[startMixture, 1:7]
+```
+
+Now the maximum dissimilarity method selects 14 more mixtures to complete a diverse set of starting points for the search algorithms 
+
+```{r}
+pool <- scaledTrain 
+index <- maxDissim(starters, pool, 14)
+startPoints <- c(startMixture, index)
+starters <- age28Data[startPoints, 1:7]
+
+# since all 7 mix proportions need to sum to 1, we can remove water and then the water proportion will be determined by the sum of the other 6 ingredients
+
+# remove water
+startingValues <- starters[, -4]
+
+```
+
+To maximize the compressive strength, optim searches the mixture space for optimal formulations. We use a custom R function to translate a candidate mixture to a prediction. This function will minimize, so it will return the negative of the compressive strength.
+
+The function checks to make sure that: 
+  1. the proportions are between 0 and 1 
+  2. The proportion of water does not fall below 5% 
+If violated, the function returns a large positive number which the search procedure will avoid (since we are minimizing)
+
+```{r}
+# inputs to function are a vecotr of six mixture proportions (in argument 'x') and the model used for prediction ('mod')
+modelPrediction <- function(x, mod){
+  # check to make sure the mixture proportions are in the correct range 
+  for (i in seq(1:6)){
+    if (x[i] < 0 | x[i] > 1) return (10^38)
+  }
+  
+  # determine water proportion 
+  x <- c(x, 1 - sum(x))
+  
+  # check the water range 
+  if (x[7] < 0.05) return (10^38)
+  
+  # convert the vector to a data frame, assign names and fix age at 28 days 
+  tmp <- as.data.frame(t(x))
+  names(tmp) <- c('Cement', 'BlastFurnaceSlag', 'FlyAsh', 
+                  'SuperPlasticizer', 'CoarseAggregate', 
+                  'FineAggregate', 'Water')
+  
+  tmp$Age <- 28 
+  
+  # get the model prediction, square them to get back to the original units, and then return the negative of the result 
+  -predict(mod, tmp)
+}
+```
+
+```{r}
+# first the cubist model is used 
+cbResults <- startingValues 
+cbResults$Water <- NA 
+cbResults$Prediction <- NA 
+
+# loop over each starting point and conduct the search 
+for (i in 1:nrow(cbResults)){
+  results <- optim(unlist(cbResults[i, 1:6]),
+                   modelPrediction,
+                   method = "Nelder-Mean",
+                   # use method = "SANN" for simulated annealing 
+                   control = list(maxit = 5000),
+                   # the next option is passed to the modelPrediction() function 
+                   mod = cbModel
+                   )
+  # save the predicted compressive strength 
+  cbResults$Prediction[i] <- -results$value 
+  # also save the final mixture values 
+  cbResults[i, 1:6] <- results$par
+}
+
+# calculate the water proportion 
+cbResults$Water <- 1 - apply(cbResults[, 1:6], 1, sum)
+
+# keep the top three mixtures 
+cbResults <- cbResults[order(-cbResults$Prediction),][1:3,]
+cbResults$Model <- "Cubist"
+```
+
+```{r}
+# then the same process for the neural network model 
+nnetResults <- startingValues 
+nnetResults$Water <- NA
+nnetResults$Prediction <- NA
+
+for (i in 1:nrow(nnetResults)){
+  results <- optim(unlist(nnetResults[i, 1:6,]),
+                   modelPrediction,
+                   method = "Nelder-Mead",
+                   control = list(maxit = 5000), 
+                   mod = nnetModel
+                   )
+  nnetResults$Prediction[i] <- -results$value 
+  nnetResults[i, 1:6] <- results$par 
+}
+
+nnetResults$Water <- 1 - apply(nnetResults[, 1:6], 1, sum)
+nnetResults <- nnetResults[order(-nnetResults$Prediction),][1:3,]
+nnetResults$Model <- "NNet"
+
+```
+
+Plotting the PCA
+
+```{r}
+# Run the PCA on the data at 28 days 
+pp2 <- preProcess(age28Data[, 1:7], "pca")
+
+# get the components for these mixtures 
+pca1 <- predict(pp2, age28Data[, 1:7])
+pca1$data <- "Training Set"
+
+# label which data points were used to start the searches 
+pca1$Data[startPoints] <- "Starting Values"
+
+# Project the new mixtures in the same way (making sure to reorder the columns to match the order of the age282Data object)
+pca3 <- predict(pp2, cbResults[, names(age28Data[, 1:7])])
+pca3$Data <- "Cubist"
+
+pca4 <- predict(pp2, nnetResults[, names(age28Data[, 1:7])])
+pca4$Data <- "Neural Network"
+
+# combine the data, determine the axis ranges and plot 
+pcaData <- rbind(pca1, pca3, pca4)
+pcaData$Data <- factor(pcaData$Data, 
+                       levels = c("Training Set", "Starting Values", "Cubist", "Neural Network"))
+lim <- extendedrange(pcaData[, 1:2])
+xyplot(PC2 ~ PC1, data = pcaData, groups = Data, 
+       auto.key = list(columns = 2), xlim = lim, ylim = lim, type = c("g", "p"))
+
+
+```
+
 
