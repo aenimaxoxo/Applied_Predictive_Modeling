@@ -1,0 +1,187 @@
+---
+title: "Ch3_Preprocessing"
+author: "Michael Rose"
+date: "July 17, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Transformations 
+
+**Centering and scaling** is the act of subtracting the mean value from the data and then dividing by its standard deviation. This makes the predictor have a mean of 0. This tends to improve the numerical stability of some calculations. 
+
+**Skewness**
+When dealing with skewness, we can use a log, sqrt or inverse transformation to help remove the skewness. 
+
+# Data Transformations for Multiple Predictors 
+
+## Resolving outliers with transformations 
+
+We shouldn't get rid of outliers, especially when we have few data points. In the low data case, the outlier could just be revealing a skewness that is not apparent because we don't have enough data to fill in the blanks. 
+
+We can also use techniques such as tree methods or svm which are robust to outliers. 
+
+Then there is a data transformation called the spatial sign. This procedure projects the predictor values onto a multidimensional sphere, having the effect of making all the samples the same distance from the center of the sphere. 
+
+Mathematically, each sample is divided by its squared norm: 
+
+$x_{ij}^* = \frac{x_{ij}}{\sum_{i}^{P} x_{ij}^2}$ 
+
+Since the denominator is intended to measure the squared distance to the center of the predictor's distribution, it is important to center and scale the predictor data prior to using this transformation. 
+
+# Data Reduction and Feature Extraction 
+
+Generally we use PCA to summarize the variability in the data. This is an unsupervised technique. If we want to do it in a supervised manner, keeping the corresponding response in mind, we use partial least squares. 
+
+A heuristic approach to determining the number of components to retain is to create a scree plot. 
+
+An exploratory use of PCA is characterizing which predictors are associated with each component. Each component is a linear combination of the predictors and the coefficient for each predictor is called the loading. Loadings close to 0 indicate that the predictor variable did not contribute much to that component. 
+
+# Dealing with Missing Values 
+
+It is important to know *why* the values are missing. If the pattern of missing data is related to the outcome, this is called *informative missingness*, since the missing data is informative on its own. Informative missingness can induce significant bias in the model. 
+
+**Imputation** is also a useful technique for filling in missing data. A good algorithm for imputation is k nearest neighbors. 
+
+# Removing Predictors 
+
+It can be advantageous to remove predictors. An example would be a predictor that is only present in a small number of the samples. A rule of thumb for detecting near-zero variance predictors is: 
+  - The fraction of unique values over the sample size is low (say 10%)
+  - The ratio of the frequency of the most prevalent value to the frequency of the second most prevalant value is large (say around 20). 
+  
+# Between-Predictor Correlations 
+
+*Collinearity* is the technical term for the situation where a pair of predictor variables have a substantial amount of correlation with each other. 
+
+In general there are good reasons to avoid data with highly correlated predictors. Redundant predictors often add more complexity to the model than information.  
+
+# Computing 
+
+## Load Libraries and Data 
+
+```{r}
+library(AppliedPredictiveModeling)
+library(caret)
+library(corrplot)
+library(e1071)
+library(lattice)
+```
+
+```{r}
+# load data
+data("segmentationOriginal")
+
+# subset data into test and train sets
+segData <- subset(segmentationOriginal, Case == "Train")
+
+# Class and Cell fields will be saved into seperate vectors and then removed from the main object
+cellID <- segData$Cell
+class <- segData$Class
+case <- segData$Case 
+
+# Remove columns above from main dataframe 
+segData <- segData[, -(1:3)] 
+
+# Remove status columns which are binary versions of the predictors 
+statusColNum <- grep("Status", names(segData)) 
+statusColNum
+
+segData <- segData[, -statusColNum]
+```
+
+## Transformations 
+
+Some features exhibited significant skewness. The skewness function in e1071 calculates the sample statistic for each predictor 
+
+```{r}
+# for one predictor 
+skewness(segData$AngleCh1)
+
+# since all predictors are numeric, the apply function can be used to compute the skewness across columns 
+skewValues <- apply(segData, 2, skewness) 
+head(skewValues)
+```
+
+Using these values as a guide, the variables can be prioritized for visualizing the distribution. 
+
+To determine which type of transformation should be used, the MASS package contains the boxcox function. Although the function estimates $\lambda$, it doesn't create the transformed variables. A caret function, boxcoxtrans can find the appropriate transformation and apply them to the new data 
+
+```{r}
+# transform with boxcox
+(Ch1AreaTrans <- BoxCoxTrans(segData$AreaCh1))
+
+# check original data 
+head(segData$AreaCh1)
+
+# after transform 
+predict(Ch1AreaTrans, head(segData$AreaCh1))
+```
+
+Another caret function, preProcess applies this transformation to a set of predictors. 
+
+The base R function prcomp can be used for PCA. In the code below, the data are centered and scaled prior to PCA 
+
+```{r}
+# PCA
+pcaObject <- prcomp(segData, center = TRUE, scale = TRUE) 
+
+# Calculate the cumulative percentage of variance which each component accounts for 
+percentVariance <- pcaObject$sdev^2 / sum(pcaObject$sdev^2) * 100 
+
+percentVariance[1:3]
+
+# The transformed values are stored in pcaObject as a subobject called x 
+head(pcaObject$x[, 1:5])
+
+# another subobject called rotation stores the variable loadings, where rows correspond to predictor variables and columns are associated with the components 
+head(pcaObject$rotation[, 1:3])
+```
+
+The caret package class spatialSign contains functionality for the spatial sign transformation. Although we do not apply this technique here, the basic syntax would be spatialSign(segData). 
+
+Also, this data does not have missing values for imputation - but to impute there is a package called impute which has a function impute.knn that uses k nearest neighbors to estimate the missing data. The previously mentioned preProcess function applies imputation methods based on KNN or bagged trees. 
+
+To administer a series of transformations to multiple datasets, the caret class preProcess has the ability to transform, center, scale, or impute values, as well as apply the spatial sign transformation and feature extraction. The function calculates the required quaantities for the transformation. After calling the preProcess function, the predict method applies the results to a set of data. 
+
+```{r}
+# box-cox transform, center, and scale the data. Then execute PCA for signal extraction 
+(trans <- preProcess(segData, method = c("BoxCox", "center", "scale", "pca")))
+
+# apply the transformations 
+transformed <- predict(trans, segData) 
+
+# these values are different than the previous PCA components since they were transformed prior to PCA 
+head(transformed[, 1:5]) 
+```
+
+The order is which the possible transformation are applied is transformation, centering, scaling, imputation, feature extraction, and then spatial sign. 
+Many of the modeling functions have options to center and scale prior to modeling. 
+
+# Filtering 
+
+To filter for near-zero variance predictors, the caret package function nearZeroVar will return the column numbers of any predictors that fulfill the conditions outlined in section 3.5. For the cell segmentation data, there are no problematic predictors. 
+
+```{r}
+# check for near zero var predictors 
+nearZeroVar(segData)
+
+# to filter on between predictor correlations, the cor function calculates corrs between predictors 
+correlations <- cor(segData) 
+dim(correlations)
+correlations[1:4, 1:4]
+corrplot(correlations, order = "hclust")
+
+# filter based on correlations 
+highCorr <- findCorrelation(correlations, cutoff = 0.75) 
+length(highCorr) 
+head(highCorr) 
+
+# remove high corr predictors 
+filteredSegData <- segData[, -highCorr]
+
+head(filteredSegData)
+```
+
