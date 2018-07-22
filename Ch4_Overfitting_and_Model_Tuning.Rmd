@@ -1,0 +1,191 @@
+---
+title: "Ch4_Overfitting_and_Model_Tuning"
+author: "Michael Rose"
+date: "July 19, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Choosing Between Models 
+
+  1. Start with several black box models that provide high accuracy such as Boosted Trees or SVM 
+  2. Investigate simpler models that are less opaque, but not complete black boxes. Examples include multivariate adaptive regression splines, partial least      squares, generalized additive models, or naive bayes models. 
+  3. Consider the simplest model that reasonably approximates the performance of the more complex methods.
+  
+# Computing 
+
+```{r}
+library(AppliedPredictiveModeling)
+library(caret)
+# library(Design)
+# install.packages("ipred")
+library(e1071) 
+library(ipred)
+library(MASS)
+
+```
+
+# Data Splitting 
+
+```{r}
+data(twoClassData)
+str(predictors)
+str(classes)
+```
+
+The base R function sample can create simple random splits of the data. To create stratified random splits of the data (based on classes), the createDataPartition function in caret will be used. 
+
+```{r}
+# set random number seed for reproducibility
+set.seed(1) 
+
+# by default, numbers are returned as a list. Using list = FALSE, a matrix of row numbers is generated. These samples are allocated to the training set 
+trainingRows <- createDataPartition(classes, p = 0.8, list = FALSE) 
+head(trainingRows)
+
+# subset the data into objects for training using integer subsetting 
+trainPredictors <- predictors[trainingRows,] 
+trainClasses <- classes[trainingRows] 
+
+# do the same for the test set using negative integers 
+testPredictors <- predictors[-trainingRows, ]
+testClasses <- classes[-trainingRows]
+
+# look at data 
+str(trainPredictors)
+str(testPredictors)
+
+```
+
+To generate a test using maximum dissimilarity sampling, the caret function maxdissim can be used to sequentially sample the data 
+
+# Resampling 
+
+The caret package has various functions for data splitting. For example, to use repeated training / test splits, the function createDataPartition could be used again with an additional argument named times to generate multiple splits. 
+
+```{r}
+set.seed(1) 
+
+# for illustration, generate the information needed for three resampled versions of the training set 
+repeatedSplits <- createDataPartition(trainClasses, p = 0.80, times = 3)
+str(repeatedSplits)
+```
+
+Similarly the caret package has functions createResamples (for bootstrapping), createFolds (for k-fold cross validation) and createMultiFolds(for repeated cross validation). To create indicators for 10 fold cross validation, 
+
+```{r}
+set.seed(1)
+
+cvSplits <- createFolds(trainClasses, k = 10, returnTrain = TRUE) 
+str(cvSplits)
+
+# get the first set of row numbers from the list 
+fold1 <- cvSplits[[1]] 
+
+# get the first 90% of the data (the first fold) 
+cvPredictors1 <- trainPredictors[fold1,]
+cvClasses1 <- trainClasses[fold1]
+nrow(trainPredictors) 
+nrow(cvPredictors1)
+
+```
+
+# Basic Model Building in R 
+
+Now that we have training and test sets, we can fit a 5 nearest neighbor classification model to the training data and use it to predict the test set. 
+
+```{r}
+# convert to matrix
+trainPredictors <- as.matrix(trainPredictors) 
+
+# fit model 
+(knnFit <- knn3(x = trainPredictors, y = trainClasses, k = 5))
+```
+
+At this point, our knn3 model is ready to predict new samples. To assign new samples to classes, the predict method is used with the model object. 
+
+```{r}
+# convention 
+testPredictions <- predict(knnFit, newdata = testPredictors, type = "class") 
+
+head(testPredictions)
+str(testPredictions)
+```
+
+# Determination of Tuning Parameters
+
+To choose tuning parameters using resampling, sets of candidate values are evaluated using different resamples of the data. A profile can be created to understand the relationship between performance and the parameter values. R has several functions and packages for this task. 
+
+The e1071 package contains the tune fucntion, which can evaluate four types of models across a range of parameters. 
+
+The errorest function in the ipred package can resample single models. 
+
+The train function in the caret package has built in modules for 144 models and includes capabiltiies for different resampling methods, performance measures, and algorithms for choosing the best model from the profile. This function also has capabilities for parallel processing so that the resampled model fits can be executed across multiple computers or processors. 
+
+%>% 
+```{r}
+# load data
+data(GermanCredit)
+GermanCredit <- GermanCredit[, -nearZeroVar(GermanCredit)]
+
+head(GermanCredit)
+
+trainingRows <- createDataPartition(GermanCredit$Class, p = 0.8, list = FALSE) 
+GermanCreditTrain <- GermanCredit[trainingRows,]
+GermanCreditTest <- GermanCredit[-trainingRows,]
+
+str(GermanCreditTrain)
+str(GermanCreditTest)
+# set seed for reproducibility 
+set.seed(1056) 
+svmFit <- train(Class ~ ., 
+                data = GermanCreditTrain, 
+                # the method arg indicates model type, see ?train for a list of available models 
+                method = "svmRadial", 
+                # preprocess model first 
+                preProc = c("center", "scale"), 
+                # user can specif exact cost values to investigate 
+                tuneLength = 10, 
+                # use repeated 10 fold cv for cv
+                trControl = trainControl(method = "repeatedcv", repeats = 5, classProbs = TRUE)
+                )
+
+# predict new samples with this model 
+predictedClasses <- predict(svmFit, GermanCreditTest)
+
+str(predictedClasses)
+
+predictedProbs <- predict(svmFit, newdata = GermanCreditTest, type= "prob")
+head(predictedProbs)
+```
+
+# Between Model Comparisons 
+
+Now we can compare the SVM model with a logistic regression model 
+
+```{r}
+set.seed(1056) 
+
+(logisticReg <- train(Class ~ ., 
+                     data = GermanCreditTrain, 
+                     method = "glm", 
+                     trControl = trainControl(method = "repeatedcv", repeats = 5)))
+```
+
+To compare these two models based on the CV statistics, the resamples function can be used with models that share a common set of resampled data sets. Since the random number seed was intialized prior to running the SVM and logistic models, paired accuracy measurements exist for each data set. 
+
+```{r}
+# create a resamples object from the models 
+resamp <- resamples(list(SVM = svmFit, Logistic = logisticReg)) 
+summary(resamp)
+
+# assess possible differences between the models 
+modelDifferences <- diff(resamp) 
+summary(modelDifferences)
+```
+
+This summary indicates that the performance distributions are very similar. The NA column corresponds to where the resampled models failed (usually due to numerical issues). The p values in the model comparison are large (0.142 for accuracy and 0.2709 for kappa), which indicates that the models fail to show any difference in performance. 
+
