@@ -1,0 +1,232 @@
+---
+title: "Ch6_Linear_Regression"
+author: "Michael Rose"
+date: "July 22, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 6.5 | Computing 
+
+```{r}
+library(elasticnet)
+library(caret)
+library(lars)
+library(MASS)
+library(pls)
+library(stats)
+library(AppliedPredictiveModeling)
+```
+
+```{r}
+data(solubility)
+
+# the data objects begin with sol
+ls(pattern = "^solT")
+
+# reproducibility
+set.seed(2)
+
+# random sample of column names
+sample(names(solTrainX), 8)
+```
+
+The FP columns correspond to the binary 0/1 fingerprint predictors that are associated with the presence or absence of a particular chemical structure. 
+Alternative versions of the data after boxcox transforms are contained within solTrainXtrans and solTestXtrans. 
+The solubility values for each compound are contained in numeric vectors named solTrainY and solTestY. 
+
+# Ordinary Linear Regression 
+
+The usual function for linear regression is lm(formula, dataframe). Since it takes a formula and a dataframe as an input, the training set predictors and outcome should be contained in the same dataframe. 
+
+```{r}
+# create a new data frame for linear model 
+trainingData <- solTrainXtrans 
+
+# add solubility outcome 
+trainingData$Solubility <- solTrainY
+
+# fit a linear model with all predictors 
+lmFitAllPredictors <- lm(Solubility ~ . , data = trainingData) 
+
+# check summary 
+summary(lmFitAllPredictors)
+```
+
+In the output above, our RMSE is 0.55 and our R^2^ is 0.94. 
+
+```{r}
+# compute the model solubility for new samples 
+lmPred1 <- predict(lmFitAllPredictors, solTestXtrans)
+head(lmPred1)
+
+# collect the observed and predicted values in a data frame and use defaultSummary to estimate test set performance 
+lmValues1 <- data.frame(obs = solTestY, pred = lmPred1)
+defaultSummary(lmValues1)
+
+```
+
+If we wanted a robust linear regression model, then the robust linear model function rlm() from the MASS package could be used - which by default employs the Huber approach. 
+
+```{r}
+# make robust linear model with huber objective function 
+rlmFitAllPredictors <- rlm(Solubility ~ ., data = trainingData) 
+```
+
+The train function generates a resampling estimate of performance. Because the training set is not small, we will use 10fold cross validation to produce reasonable estimates of model performance. 
+
+```{r}
+# trainControl specifies type of resampling 
+ctrl <- trainControl(method = "cv", number = 10)
+```
+
+train will accept a model formula or a non formula interface. 
+
+```{r}
+# non formula interface 
+set.seed(100) 
+lmFit1 <- train(x = solTrainXtrans, y = solTrainY, method = "lm", trControl = ctrl)
+
+lmFit1
+```
+
+For models built to *explain*, it is important to check model assumptions - such as the residual distribution. For predictive models, some of the same diagnostic techniques can shed light on areas where the model is not predicting well. 
+
+For example, if we plot the residuals vs. the predicted values for the model then we would hope to see a random cloud of points - assuring us that there are no major terms missing from the model (such as quadratic terms, etc). 
+
+Another important plot is the predicted values vs the observed values to assess how close the predictions are to the actual values. 
+
+```{r}
+# plot predicted against observed to see how close the predictions are to the actual values 
+xyplot(solTrainY ~ predict(lmFit1), 
+       # plot the points (type = 'p'), and a background grid 'g'
+       type = c("p", "g"), 
+       xlab = "Predicted", ylab = "Observed")
+
+# check residuals to make sure nothing is missing 
+xyplot(resid(lmFit1) ~ predict(lmFit1), 
+       type = c("p", "g"), 
+       xlab = "Predicted", ylab = "Residuals")
+```
+
+To build a smaller model without predictors with extremely high correlations, we can use the methods of section 3.3 to reduce the number of predictors s.t. there are no absolute pairwise correlations above 0.9 
+
+```{r}
+# set threshold
+corThresh <- 0.9
+
+# find correlations above 0.9
+tooHigh <- findCorrelation(cor(solTrainXtrans), corThresh) 
+
+# find columns with tooHigh correlation
+corrPred <- names(solTrainXtrans)[tooHigh]
+
+# remove highly correlated variables
+trainXfiltered <- solTrainXtrans[, -tooHigh]
+
+# remove highly correlated variables from test set 
+testXfiltered <- solTestXtrans[, -tooHigh]
+
+# seed for reproducibility
+set.seed(100)
+
+# fit model
+(lmFiltered <- train(solTrainXtrans, solTrainY, method = "lm", trControl = ctrl))
+```
+
+Robust linear regression can also be performed using the train function which employs the rlm function. To ensure that predictors are not singular, we will preprocess the predictors using PCA. Using the filtered set of predictors: 
+
+```{r}
+set.seed(100)
+rlmPCA <- train(solTrainXtrans, solTrainY, method = "rlm", preProcess = "pca", trControl = ctrl) 
+rlmPCA
+```
+
+# Partial Least Squares 
+
+The pls package has functions for partial least squares and principal component regression. 
+
+
+```{r}
+# fit partial least squares 
+plsFit <- plsr(Solubility ~ ., data = trainingData)
+
+# number of components can be fixed with ncomp. default = max num comps 
+
+# predict on new samples 
+predict(plsFit, solTestXtrans[1:5,], ncomp = 1:2)
+
+# other PLS options 
+set.seed(100) 
+plsTune <- train(solTrainXtrans, solTrainY, method = "pls",
+                 # default tuning grid evaluates components 1 through tuneLength 
+                 tuneLength = 20, 
+                 trControl = ctrl, 
+                 preProc = c("center", "scale"))
+```
+
+# Penalized Regression Models 
+
+```{r}
+# fit ridge regression model 
+ridgeModel <- enet(x = as.matrix(solTrainXtrans), y = solTrainY, lambda = 0.001)
+```
+
+Recall that the elastic net model has both ridge penalties and lasso penalties. The object ridgeModel has only the fixed ridge penalty value currently. 
+The predict function for enet objects generates predictions for one or more values of the lasso penalty simultaneously using the s and mode arguments. 
+For ridge regression, we only desire a single lasso penalty of 0, so we want the full solution. To produce a ridge regression solution, we define s = 1, with mode = "fraction". This last option specifies how the amount of penalization is defined; in this case a value of 1 corresponds to a faction of 1, i.e. the full solution:
+
+```{r}
+ridgePred <- predict(ridgeModel, newx = as.matrix(solTestXtrans), s = 1, mode = "fraction", type = "fit")
+head(ridgePred$fit)
+```
+
+To tune over the penalty, train can be used with a different method
+
+```{r}
+# define the candidate set of values 
+ridgeGrid <- data.frame(.lambda = seq(0, .1, length = 15)) 
+set.seed(100) 
+ridgeRegFit <- train(solTrainXtrans, solTrainY, method = "ridge", tuneGrid = ridgeGrid, trControl = ctrl, prePrc = c("center", "scale"))
+ridgeRegFit
+```
+
+The lasso model can be estimated using a number of different functions. The lars package contains the lars function, the elasticnet package has enet, and the glmnet package has a function of the same name. 
+
+```{r}
+# for the enet package. normalize scales and centers. lambda controls penalty. lambda = 0 is the lasso  
+enetModel <- enet(x = as.matrix(solTrainXtrans), y = solTrainY, lambda = 0.01, normalize = TRUE) 
+
+# lasso penality doesnt need to be specified until prediction time 
+enetPred <- predict(enetModel, newx = as.matrix(solTestXtrans), s - 0.1, mode = "fraction", type = "fit")
+
+# check returned list 
+names(enetPred) 
+
+# fit component has the predicted values 
+head(enetPred$fit)
+
+# determine predictors used in the model 
+enetcoef <- predict(enetModel, newx = as.matrix(solTestXtrans), s = 0.1, mode = "fraction", type = "coefficients") 
+tail(enetCoef$coefficients) 
+```
+
+Other pakcgaes to fit the lasso model or some alternative are biglars (for large data sets), FLLat (for the fused lasso), grplasso (for the group lasso), penalized, relaxo (the relaxed lasso), and others. 
+
+```{r}
+# tune the model over a custom set of penalties 
+enetGrid <- expand.grid(.lambda = c(0, 0.01, 0.1), 
+                        .fraction = seq(0.05, 1, length = 20)) 
+set.seed(100) 
+enetTune <- train(solTrainXtrans, solTrainY, 
+                  method = "enet", 
+                  tuneGrid = enetGrid, 
+                  trControl = ctrl, 
+                  preProc = c("center", "scale"))
+
+plot(enetTune)
+```
+

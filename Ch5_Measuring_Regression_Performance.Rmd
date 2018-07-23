@@ -1,0 +1,62 @@
+---
+title: "Ch5_Measuring_Regression_Performance"
+author: "Michael Rose"
+date: "July 21, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 5.1 | Quantitative Measures of Performance 
+
+When the outcome is a number, the most common method for characterizing a model's predictive capabilities is to use the root mean squared error. 
+
+Another common metric is the R^2^ value. This can be interpreted as the proportion of the information in the data that is explained by the model. Thus, an r^2 value of 0.75 implies that the model can explain 3/4 of the variation in the outcome. The practicioner must remember that R^2^ is a measure of correlation, and not accuracy. 
+
+Sometimes we are seeking the ability to rank new samples. In this situation, determining the rank correlation between the observed and predicted values might be a more appropriate metric. The rank correlation takes the ranks of the observed outcome values (as opposed to their actual numbers) and evaluates how close these are to ranks of the model predictions. To calculate this value, the ranks of the observed and predicted outcomes are obtained and the correlation coefficient between these ranks is calculated. This metric is commonly known as *Spearman's Rank Correlation*.
+
+# 5.3 | Computing 
+
+```{r}
+library(caret)
+```
+
+```{r}
+# use the c function to combine numbers into a vector 
+observed <- c(0.22, 0.83, -0.12, 0.89, -0.23, -1.3, -0.15, -1.4, 
+              0.62, 0.99, -0.18, 0.32, 0.34, -0.3, 0.04, -0.87, 
+              0.55, -1.3, -1.15, 0.2)
+
+predicted <- c(0.24, 0.78, -0.66, 0.53, 0.70, -0.75, -0.41, -0.43,
+               0.49, 0.79, -1.19, 0.06, 0.75, -0.07, 0.43, -0.42,
+              -0.25, -0.64, -1.26, -0.07)
+
+# get residuals 
+residualValues <- observed - predicted 
+summary(residualValues)
+
+# observed values vs predicted values. Its a good idea to plot on a common scale 
+axisRange <- extendrange(c(observed, predicted)) 
+plot(observed, predicted, 
+     ylim = axisRange, xlim = axisRange)
+
+# add a 45 degree reference line 
+abline(0, 1, col = "darkgrey", lty = 2)
+
+# predicted values vs residuals 
+plot(predicted, residualValues, ylab = "residual") 
+abline(h = 0, col = "darkgrey", lty = 2)
+
+# calculate RMSE and the R^2 value 
+R2(predicted, observed) 
+RMSE(predicted, observed) 
+
+# simple correlation 
+cor(predicted, observed) 
+
+# rank correlation 
+cor(predicted, observed, method = "spearman")
+```
+
