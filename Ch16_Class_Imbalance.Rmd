@@ -1,0 +1,334 @@
+---
+title: "Ch16_Class_Imbalance"
+author: "Michael Rose"
+date: "July 23, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 16.3 | Model Tuning
+
+The simplest approach to counteracting the negative effects of class imbalance is to tune the model to maximize the accuracy of the minority classes. 
+
+# 16.4 | Alternate Cutoffs 
+
+When there are two possible outcome categories, another method for increasing the prediction accuracy of the minority class samples is to determine alternative cutoffs for the predicted probabilities which effectively changes the definition of a predicted event. We can do this by changing where we want the cutoff for classification to be on the ROC curve. 
+
+# 16.5 | Adjusting Prior Probabilities 
+
+We can shift the priors for our model when using bayesian methods like naive bayes and discriminant analysis classifiers. This gives us a different sensitivity and specificity in our classifier. 
+
+# 16.6 | Unequal Case Weights 
+
+One approach to rebalancing the training set would be to increase the weights for the samples in the minority classes. This can be interpreted (for some models) as having identical duplicate data points with the exact same predictor values. 
+
+# 16.7 | Sampling Methods
+
+When there is a priori knowledge of class imbalance, one straightforward method to reduce its impact on model training is to select a training set sample to have roughly equal event rates during the initial data collection. 
+
+If the data is sampled to be balanced, our test set should accurately reflect the correct class balances in the population and not the artificial sampling. 
+
+If a priori sampling is not possible, then there are post hoc sampling approaches that can help attenuate the effects of the imbalance during model training. Two approaches are *up-sampling* and *down-sampling* the data. 
+
+Up-sampling is any technique that simulates or imputes additional data points to improve class balance
+Down-sampling refers to any technique that reduces the number of samples to improve the balance across classes 
+
+Ling and Li provide an approach to upsampling in which cases from the minroity classes are sampled with replacement until each class has approximately the same number. In this case, if there is a big class imbalance, the minority class would be repeatedly sampled until the classes were balanced. This would lead to certain data points having very high frequency in the data. This is similar to the case weight approach shown in an earlier section, with varying weights per case. 
+
+Downsampling selects data points from the majority class so that the majority class is roughly the same size as the minority class(es). There are several approaches to downsampling. First, a basic approach is to randomly sample the majority classes so that all classes have approximately the same size. 
+Another approach would be to take a bootstrap sample across all cases such that the classes are balanced in the bootstrap set. The advantage to this approach is that the bootstrap can be run many times so that the estimate of variation can be obtained about the downsampling. 
+
+One implementation of random forests can inherently downsample by controlling the bootstrap sampling process with a *stratification variable*. If class is used as the stratification variable, then the bootstrap samples will be created that are roughly the same size per class. These *internally down-sampled* versions of the training set are then used to construct trees in the ensemble. 
+
+The *SMOTE: Synthetic Minority Over-sampling Technique* is a data sampling procedure that uses both up and downsampling, depending on the class, and have 3 operational parameters - the amount of upsampling, the amount of downsampling, and the number of neighbors that are used to impute new cases. 
+To upsample for the minority class, SMOTE synthesizes new cases. To do this, a data point is randomly selected from the minority class and its KNNs are determined. The new synthetic data point is a random combination of the predictors of the randomly selected data point and its neighbors. 
+SMOTE can also downsample cases from the majority class via random sampling in order to help balance the training set. 
+
+# 16.8 | Cost-Sensitive Training 
+
+Instead of optimizing the typical performance measure, such as accuracy or impurity, some models can alternatively optimize a cost or loss function that differentially weights specific types of errors. 
+
+# 16.9 | Computing 
+
+```{r}
+library(caret)
+library(C50)
+library(DMwR)
+library(DWDLargeR) 
+library(kernlab) 
+library(pROC) 
+library(rpart)
+```
+
+```{r}
+data(ticdata)
+head(ticdata)
+```
+
+There are several factor variables in the data set which have nonstandard characters, like %, commas, and other values. When these are converted to dummy variable columns, the values violate the rules for naming variables. To bypass this, we re-encode names to be more simplistic: 
+
+```{r}
+### Some of the predictor names and levels have characters that would results in
+### illegal variable names. We convert then to more generic names and treat the
+### ordered factors as nominal (i.e. unordered) factors. 
+
+isOrdered <- unlist(lapply(ticdata, function(x) any(class(x) == "ordered")))
+
+recodeLevels <- function(x)
+  {
+    x <- gsub("f ", "", as.character(x))
+    x <- gsub(" - ", "_to_", x)
+    x <- gsub("-", "_to_", x)
+    x <- gsub("%", "", x)
+    x <- gsub("?", "Unk", x, fixed = TRUE)
+    x <- gsub("[,'\\(\\)]", "", x)
+    x <- gsub(" ", "_", x)
+    factor(paste("_", x, sep = ""))
+  }
+
+convertCols <- c("STYPE", "MGEMLEEF", "MOSHOOFD",
+                 names(isOrdered)[isOrdered])
+
+for(i in convertCols) ticdata[,i] <- factor(gsub(" ", "0",format(as.numeric(ticdata[,i]))))
+
+ticdata$CARAVAN <- factor(as.character(ticdata$CARAVAN),
+                          levels = rev(levels(ticdata$CARAVAN)))
+```
+
+The training and test sets are created using stratified random sampling 
+
+```{r}
+# first, split the training set off 
+set.seed(156) 
+split1 <- createDataPartition(ticdata$CARAVAN, p = 0.7)[[1]] 
+other <- ticdata[-split1, ] 
+training <- ticdata[split1, ]
+
+# create evaluation and test sets 
+set.seed(934) 
+split2 <- createDataPartition(other$CARAVAN, p = 1/3)[[1]] 
+evaluation <- other[split2,]
+testing <- other[-split2,] 
+
+# determine predictor names 
+predictors <- names(training)[names(training) != "CARAVAN"]
+
+```
+
+Dummy variables are useful for several models being fit in this section. The randomForest function has a limitation that all factor predictors must not have more than 32 levels. The customer type predictor has 39 levels, so a predictor set of dummy variables is created for this and other models using the model.matrix function. 
+
+```{r}
+# the first column is the intercept, which is eliminated 
+trainingInd <- data.frame(model.matrix(CARAVAN ~ ., data = training))[,-1] 
+evaluationInd <- data.frame(model.matrix(CARAVAN ~ ., data = evaluation))[, -1] 
+testingInd <- data.frame(model.matrix(CARAVAN ~ ., data = testing))[, -1] 
+head(trainingInd)
+
+# add the outcome back into the data set 
+trainingInd$CARAVAN <- training$CARAVAN 
+evaluationInd$CARAVAN <- evaluation$CARAVAN 
+testingInd$CARAVAN <- testing$CARAVAN 
+
+# determine a predictor set without highly sparse and unbalanced distributions 
+isNZV <- nearZeroVar(trainingInd) 
+noNZVSet <- names(trainingInd)[-isNZV] 
+```
+
+To obtain different performance measures, two wrapper functions were created: 
+
+```{r}
+# for accuracy, kappa, the area under the ROC curve, sensitivity and specificity 
+fiveStats <- function(...){
+  c(twoClassSummary(...), 
+    defaultSummary(...))
+} 
+
+# everything but the area under the ROC curve 
+fourStats <- function(data, lev = levels(data$obs), model = NULL){
+  accKapp <- postResample(data[, "pred"], data[, "obs"]) 
+  out <- c(accKapp, 
+           sensitivity(data[, "pred"], data[, "obs"], lev[1]), 
+           specificity(data[, "pred"], data[, "obs"], lev[2])) 
+  names(out)[3:4] <- c("Sens", "Spec") 
+  out
+}
+```
+
+Two control functions are developed for situations when class probabilities can be created and when they cannot 
+
+```{r}
+ctrl <- trainControl(method = "cv", 
+                     classProbs = TRUE, 
+                     summaryFunction = fiveStats, 
+                     verboseIter = TRUE) 
+ctrlNoProb <- ctrl 
+ctrlNoProb$summaryFunction <- fourStats 
+ctrlNoProb$classProbs <- FALSE 
+```
+
+The three baseline models were fit with the syntax 
+
+```{r}
+set.seed(1410)
+head(trainingInd)
+
+rfFit <- train(CARAVAN ~ ., data = trainingInd, 
+               method = "rf", trControl = ctrl, 
+               ntree = 1500, tuneLength = 5, 
+               metric = "ROC")
+
+lrFit <- train(CARAVAN ~ ., 
+               data = trainingInd[, noNZVSet], 
+               method = "glm", 
+               trControl = ctrl, 
+               metric = "ROC") 
+
+set.seed(1401) 
+fdaFit <- train(CARAVAN ~ ., data = training, 
+                method = "fda", tuneGrid = data.frame(.degree = 1, .nprune = 1:25), 
+                metric = "ROC", trControl = ctrl)
+
+```
+
+A dataframe is used to house the predictions from different models: 
+
+```{r}
+evalResults <- data.frame(CARAVAN = evaluation$CARAVAN)
+evalResults$RF <- predict(rfFit, newdata = evaluationInd, type = "prob")[,1]
+evalResults$FDA <- predict(fdaFit, newdata = evaluation[, predictors], type = "prob") 
+evalResults$LogReg <- predict(lrFit, newdata = valuationInd[, noNZVSet], type = "prob")[,1] 
+```
+
+The ROC and lift curves are created from these objects. For example 
+
+```{r}
+rfROC <- roc(evalResults$CARAVAN, evalResults$RF, 
+             levels = rev(levels(evalResults$CARAVAN))) 
+
+# create labels for the models: 
+labs <- c(RF = "Random Forest", LogReg = "Logistic Regression", FDA = "FDA (MARS)") 
+lift1 <- lift(CARAVAN ~ RF + LogReg + FDA, data = evalResults, labels = labs) 
+
+rfROC
+lift1
+
+# plot curves 
+plot(rfROC, legacy.axes = TRUE) 
+xyplot(lift1, 
+       ylab = "% Events Found", xlab = "% Customers Evaluated", lwd = 2, type = "l")
+```
+
+# Alternate Cutoffs 
+
+After the ROC curve has been created, there are several functions in the pROC package that can be used to investigate possible cutoffs. The coords function returns the points on the ROC curve as well as deriving new cutoffs. The main arguments are x, which specifies what should be returned. A value of x = "all" will return the coords for the curve and their associated cutoffs. A value of "best" will derive a new cutoff. Using x = "best" in conjunction with the best.method (either "youden" or "closest.topleft") can be informative
+
+```{r}
+# find best random forest threshold
+rfThresh <- coords(rfROC, x = "best", best.method = "closest.topleft") 
+rfThresh 
+
+# for this, new predicted classes can be calculated 
+newValue <- factor(ifelse(evalResult$RF > rfThresh, 
+                          "insurance", "noinsurance"), 
+                   levels = levels(evalResults$CARAVAN)) 
+```
+
+# Sampling Methods
+
+The caret package has two functions, downSample and upSample, that readjust the class frequencies. Each takes arguments for the predictors, called x, and the outcome class y. Both functions return a data frame with the sampled version of the dataset. 
+
+```{r}
+set.seed(1103) 
+upSampledTrain <- upSample(x = training[, predictors], 
+                           y = training$CARAVAN, 
+                           # keep the class variable name the same 
+                           yname = "CARAVAN") 
+
+dim(training)
+dim(upSampledTrain)
+table(upSampledTrain$CARAVAN)
+```
+
+The downsampling function has the same syntax. A function for SMOTE can be found in the DMwR package. It takes a model formula as an input, along with parameters (such as the amount of over and undersampling and number of neighbors).
+
+```{r}
+set.seed(1103) 
+smoteTrain <- SMOTE(CARAVAN ~., data = training) 
+
+dim(smoteTrain)
+table(smoteTrain$CARAVAN)
+```
+
+These datasets can be used as inputs into the previous code. 
+
+# Cost Sensitive Training 
+
+Class-weighted SVMs can be created using the kernlab package. 
+
+```{r}
+# we will train over a large cost range, so we precompute the sigma parameter and make a custom tuning grid 
+set.seed(1157) 
+sigma <- sigest(CARAVAN ~ ., data = trainingInd[, noNZVSet], frac = 0.75) 
+names(sigma) <- NULL 
+svmGrid <- data.frame(.sigma = sigma[2], 
+                      .C = 2^seq(-6, 1, length = 15)) 
+
+# class probabilities cannot be generated with class weights, so use the control object 'ctrlNoProb' to avoid estimating the ROC curve 
+set.seed(1401) 
+SVMwts <- train(CARAVAN ~., 
+                data = trainingInd[, noNZVSet], 
+                method = "svmRadial", 
+                tuneGrid = svmGrid, 
+                preProc = c("center", "scale"), 
+                class.weights = c(insurance = 18, noinsurance = 1), 
+                metric = "Sens", 
+                trControl = ctrlNoProb) 
+
+SVMwts
+```
+
+For cost sensitivie CART models, the rpart package is used with the parms argument, which is a list of fitting options. One option, loss, can take a matrix of costs: 
+
+```{r}
+costMatrix <- matrix(c(0, 1, 20, 0), ncol = 2)
+rownames(costMatrix) <- levels(training$CARAVAN)
+colnames(costMatrix) <- levels(training$CARAVAN) 
+costMatrix
+```
+
+Here there would be a 20 fold higher cost of a fale negative than a false positive 
+
+```{r}
+# fit the model 
+set.seed(1401) 
+cartCosts <- train(x = training[, predictors], 
+                   y = training$CARAVAN,
+                   method = "rpart", 
+                   trControl = ctrlNoProb, 
+                   metric = "Kappa",
+                   tuneLength = 10,
+                   parms = list(loss = costMatrix))
+
+```
+
+C5.0 has a similar syntax to rpart by taking a cost matrix, although this function uses the transpose of the cost matrix structure used by rpart 
+
+```{r}
+c5Matrix <- matrix(c(0, 20, 1, 0), ncol = 2) 
+rownames(c5Matrix) <- levels(training$CARAVAN) 
+colnames(c5Matrix) <- levels(training$CARAVAN)
+c5Matrix
+
+set.seed(1401)
+c5Cost <- train(x = training[, predictors], 
+                y = training$CARAVAN, 
+                method = "C5.0", 
+                metric = "Kappa", 
+                cost = c5Matrix, 
+                trControl = ctrlNoProb)
+```
+
+When employing costs, the predict function for this model only produces the discrete classes. 
