@@ -1,0 +1,263 @@
+---
+title: "Ch19_Feature_Selection"
+author: "Michael Rose"
+date: "July 28, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 19.1 | Consequences of Using Non-Informative Predictors 
+
+In this section, they show a series of plots. These plots show how the RMSE of a model increases as non informative predictors are added. Regression trees and MARS models are not affected since they have built in feature selection. Lasso also does well. Random Forest shows a moderate degradation of performance, and neural networks get wrecked. 
+
+# 19.2 | Approaches for Reducing the Number of Predictors  
+
+Apart from models with built in feature selection, most approaches for reducing the number of predictors can be placed into 2 main categories: 
+
+*Wrapper* methods evaluate multiple models using procedures that add and/or remove predictors to find the optimal combination that maximizes model performance. In essence, they are search algorithms that treat the predictors as inputs and utilize model performance as the output to be optimized. 
+
+*Filter* methods evaluate the relevance of the predictors outside of the predictive models and subsequently model only the predictors that pass some criterion. Only predictors with important relationships would be included. 
+
+Filter methods tend to be more computationally efficient than wrapper methods, but the selection criterion is not directly related to the effectiveness of the model. Also, most (but not all) filter methods tend to evaluate each predictor seperately, and consequently, redundant predictors may be selected and important interactions between variables will not be able to be quantified. 
+
+The downside of the wrapper method is that many models are evaluated (which may also require parameter tuning), and thus an increase in computation time. There is also an increased risk of overfitting with wrappers. 
+
+# 19.3 | Wrapper Methods 
+
+An example if the classical forward selection for linear regression. 
+
+There are a few issues with this approach: 
+  1. The forward search procedure is greedy,  meaning it doesn't reevaluate part solutions 
+  2. The use of repeated hypothesis tests in this manner invalidates many of the statistical properties since the same data are being evaluated numerious        times. 
+  3. Maximizing statistical significance may not be the same as maximizing more relevant accuracy-based quantities. 
+  
+Another optimization method for predictor selection is *simulated annealing*. Simulated annealing works by choosing a subset of predictors, checking its performance P1, then creating another slightly changed subset with performance P2. If P2 is better than P1, the new feature set is accepted. If it is worse however, it may still be accepted with some probability $p_i$ where i is the iteration of the process. This probability decreases over time s.t. as i becomes large, it becomes very unlikely that a suboptimal configuration will be accepted. This process continues for some fixed number of iterations before setting an a best subset. This algorithm helps to avoid local optima by using bad subsets to further explore the predictor space. 
+
+Since finding the best subset is a convex optimization problem, we can reframe the problem in terms of a *genetic algorithm* as well. 
+
+# 19.4 | Filter Methods 
+
+Filter methods evaluate the predictors prior to training the model, and based on this evaluation, a subset of predictors are entered into the model. 
+
+If hypothesis tests are used to determine which predictors have statistically significant relationships with the outcome (such as the t-test), the problem of *multiplicity* can occur. For example, if a confidence level of alpha = 0.05 is used as a p-value threshold for significance, each individual test has a theoretical false positive rate of 5%. However, when a large number of statistical tests are conducted simultaneously, the overall false postive probability increases exponentially. 
+
+To account for this, a p-value adjustment procedure can control the false positive rate. The *Bonferonni Correction* is such a procedure. 
+
+# 19.7 | Computing 
+
+```{r}
+library(AppliedPredictiveModeling)
+library(caret)
+library(klaR)
+library(leaps)
+library(MASS)
+library(pROC)
+library(rms)
+library(stats)
+```
+
+
+```{r}
+# load data
+data(AlzheimerDisease)
+
+# manually create new dummy variables 
+predictors$E2 <- predictors$E3 <- predictors$E4 <- 0 
+predictors$E2[grepl("2", predictors$Genotype)] <- 1 
+predictors$E3[grepl("3", predictors$Genotype)] <- 1 
+predictors$E4[grepl("4", predictors$Genotype)] <- 1 
+
+# split the data using stratified sampling 
+set.seed(300) 
+split <- createDataPartition(diagnosis, p = 0.8, list = FALSE) 
+
+# combine into one data frame 
+adData <- predictors 
+adData$Class <- diagnosis
+
+training <- adData[split,]
+testing <- adData[-split,]
+
+# save a vector of predictor variable names 
+predVars <- names(adData)[!(names(adData) %in% c("Class", "Genotype"))]
+
+# compute the area under ROC curve, sensitivity, specificity, accuracy, and kappa 
+fiveStats <- function(...){
+  c(twoClassSummary(...), 
+    defaultSummary(...)) 
+}
+
+# create resampling data sets to use for all models 
+set.seed(104) 
+index <- createMultiFolds(training$Class, times = 5)
+
+# create a vector of subset sizes to evaluate 
+varSeq <- seq(1, length(predVars) - 1, by = 2)
+```
+
+# Forward, Backward, and Stepwise Selection 
+
+*steps* in the stats package can be used to search for appropriate subsets for linear regression and generalized linear models. The *direction* argument controls the search method (e.g. both, backward, or forward).
+
+A more general function is the *stepAIC* function in the MASS package, which can handle additional model types. In either case, the AIC statistic (or its variants) is used as the objective function. 
+
+The *fastbw* function in the rms package conducts similar searches but has the optional (not reccommended) choice of using p-values as the objective function.  
+
+The *regsubsets* function in the leaps package has similar functionality 
+
+The klaR package containes the *stepclass* function that searches the predictor space for models that maximize cross validated accuracy rates. The function has built in methods for several models, such as lda but can be more broadly generalized. 
+
+The caret package function train has wrappers for leaps, stepAIC, and stepclass. 
+
+```{r}
+# for example, stepAIC with logistic regression 
+initial <- glm(Class ~ tau + VEGF + E4 + IL_3, data = training, family = binomial) 
+stepAIC(initial, direction = "both")
+
+```
+
+The function above returns a glm object with the final predictor set. 
+
+# Recursive Feature Elimination 
+
+```{r}
+# caret's built in random forest functions are in rfFuncs 
+str(rfFuncs)
+```
+
+summary defines how predictions will be evaluated 
+fit function allows the user to specify the model and conduct parameter tuning 
+pred generates predictions for new samples 
+rank generates importance measures 
+selectSize chooses the appropriate predictor subset size 
+selectVar picks which variables are used in the final model 
+
+```{r}
+# these options can be changed 
+newRF <- rfFuncs
+newRF$summary <- fiveStats
+
+# to run the RFE procedure for random forests, the syntax is 
+ctrl <- rfeControl(method = "repeatedcv", 
+                   repeats = 5, 
+                   verbose = TRUE, 
+                   functions = newRF,
+                   index = index) 
+
+set.seed(721) 
+rfRFE <- rfe(x = training[, predVars], 
+             y = training$Class, 
+             sizes = varSeq, 
+             metric = "ROC", 
+             rfeControl = ctrl, 
+             # now pass options to randomForest()
+             ntree = 1000) 
+rfRFE
+
+# process for predicting new samples 
+predict(rfRFE, head(testing)) 
+```
+
+The built in functions predict the classes and probabilities for classification. There are also built in functions to do recursive feature selection for models that require retuning at each iteration. 
+
+```{r}
+# fit SVMs 
+svmFuncs <- caretFuncs 
+svmFuncs$summary <- fivestats 
+
+ctrl <- rfeControl(method = "repeatedcv", 
+                   repeats = 5, 
+                   verbose = TRUE, 
+                   functions = svmFuncs, 
+                   index = index) 
+
+set.seed(721) 
+
+svmRFE <- rfe(x = training[, predVars], 
+              y = training$Class, 
+              sizes = varSeq, 
+              metric = "ROC", 
+              rfeControl = ctrl, 
+              # now options to train() 
+              method = "svmRadial", 
+              tuneLength = 12, 
+              preProc = c("center", "scale"), 
+              # below specifies the inner resampling process 
+              trControl = trainControl(method = "cv", 
+                                       verboseIter = FALSE,
+                                       classProbs = TRUE)) 
+
+svmRFE 
+```
+
+# Filter Methods 
+
+Caret has a function called sbf (selection by filter) that can be used to screen predictors for models and to estimate performance using resampling. 
+
+```{r}
+# to compute a p-value for each predictor 
+pScore <- function(x, y){
+  numX <- length(unique(x)) 
+  if (numX > 2){
+    # with many values in x, compute a t-test 
+    out <- t.test(x ~ y)$p.value 
+  } else {
+    # for binary predictors, test the odds ratio == 1 via fishers exact test 
+    out <- fisher.test(factor(x), y)$p.value
+  }
+  out
+}
+
+# apply the scores to each of the predictor columns 
+scores <- apply(X = training[, predVars], 
+                MARGIN = 2, 
+                FUN = pScore, 
+                y = training$Class)
+
+tail(scores)
+```
+
+A function can also be designed to apply a p-value correction, such as the Bonferroni procedure: 
+
+```{r}
+pCorrection <- function(score, x, y){
+  # the options x,y are required by the caret package but are not used here 
+  score <- p.adjust(score, "bonferroni") 
+  # return a logical vector to decide which predictors to retain after the filter 
+  keepers <- (score <= 0.05) 
+  keepers
+}
+
+tail(pCorrection(scores))
+```
+
+caret contains a number of built in functions for filter methods: linear regression, random forests, bagged trees, LDA, and naive bayes 
+
+These functions are similar to those shown for rfe. The *score* function computes some quantitative measure of importance (e.g. the p-values produced by the previous pScore function). The function filter takes these values (and the raw training set data) and determines which predictors pass the filter. 
+
+```{r}
+# fit filtered LDA model 
+ldaWithPvalues <- ldaSBF
+ldaWithPvalues$score <- pScore 
+ldaWithPvalues$summary <- fiveStats 
+ldaWithPvalues$filter <- pCorrection 
+
+sbfCtrl <- sbfControl(method = "repeatedcv", 
+                      repeats = 5, 
+                      verbose = TRUE, 
+                      functions = ldaWithPvalues, 
+                      index = index) 
+
+ldaFilter <- sbf(training[, predVars], 
+                 training$Class, 
+                 tol = 1.0e-12, 
+                 sbfControl = sbfCtrl)
+
+ldaFilter
+
+```
+
+
