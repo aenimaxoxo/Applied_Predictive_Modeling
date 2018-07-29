@@ -1,0 +1,77 @@
+---
+title: "Ch20_Model_Performance_Factors"
+author: "Michael Rose"
+date: "July 28, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Algorithm 20.1 
+This is an algorithm for determining similarity to the training set: 
+  1. Compute the variable importance for the original model and identify the top 20 predictors
+  2. Randomly permute these predictors from the training set 
+  3. Row wise concatenate the original training set's top predictors and the randomly permuted version of these predictors 
+  4. Create a classification vector that identifies the rows of the original training set and the rows of the permuted training set 
+  5. Train a classification model on the newly created data 
+  6. Use the classification model to predict the probability of new data being in the class of the training set 
+  
+# Computing 
+
+One new computing thread presented here addresses the implementation of algorithm 20.1 
+
+```{r}
+library(AppliedPredictiveModeling)
+library(caret)
+```
+
+```{r}
+data(solubility)
+set.seed(100)
+
+indx <- createFolds(solTrainY, returnTrain = TRUE) 
+ctrl <- trainControl(method = "cv", index = indx)
+```
+
+Next we tune the desired model and compute variable importance, since the similarity algorithm can be made more efficient by working with the most important predictors. 
+
+```{r}
+# tune a random forest model and create a subset of the training and test data using top 20 predictors for inclusion in similarity algorithm 
+set.seed(100)
+
+mtryVals <- floor(seq(10, ncol(solTrainXtrans), length = 10)) 
+mtryGrid <- data.frame(.mtry = mtryVals) 
+
+rfTune <- train(x = solTrainXtrans, y = solTrainY, 
+                method = "rf", tuneGrid = mtryGrid, 
+                ntree = 1000, importance = TRUE, 
+                trControl = ctrl) 
+
+ImportanceOrder <- order(rfTune$finalModel$importance[,1], decreasing = TRUE) 
+
+top20 <- rownames(rfTune$finalModel$importance[ImportanceOrder,])[1:20] 
+
+solTrainXimp <- subset(solTrainX, select = top20) 
+solTestXimp <- subset(solTestX, select = top20)
+```
+
+The subset of predictors are then permuted to create the random set. 
+
+```{r}
+permutesolTrainXimp <- apply(solTrainXimp, 2, function(x) sample(x))
+solSimX <- rbind(solTrainXimp, permutesolTrainXimp)
+groupVals <- c("Training", "Random")
+groupY <- factor(rep(groupVals, each = nrow(solTrainX)))
+
+# tune a model on the classification data and predict the training set membership probability 
+rfSolClass <- train(x = solSimX, y = groupY,
+                    method = "rf",
+                    tuneLength = 5,
+                    ntree = 1000,
+                    control = trainControl(method = "LGOCV"))
+solTestGroupProbs <- predict(rfSolClass, solTestXimp, type = "prob")
+```
+
+
