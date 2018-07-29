@@ -1,0 +1,253 @@
+---
+title: "Ch18_Measuring_Predictor_Importance"
+author: "Michael Rose"
+date: "July 27, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 18.1 | Numeric Outcomes 
+
+For numeric predictors, the classic approach to quantifying each relationship with the outcome uses the sample correlation statistic. This quantity measures linear associations. If the relationship is nearly linear or curvilinear, then Spearman's correlation coefficient may be more effective. 
+
+An alternative is to use more flexible models that are capable of modeling general nonlinear relationships. One technique is loess. 
+
+If we need to compare the mean of two groups, the most natural method is the *t-test*. The t-test is essentially a signal to noise ratio. A p-value can be produced by this procedure where the null hypothesis is that there is no different between the groups. The assumption for the data is that is is normally distributed. If this assumption is unlikely, other methods such as the *Wilcoxon Rank Test* may be more appropriate. 
+
+When the predictor has more than 2 values, an *anova* model can be used to characterize the statistical significance of the predictors. 
+
+# 18.2 | Categorical Outcomes 
+
+With categorical outcomes and numerical predictors, there are several approaches to quantifying the importance of the predictor. 
+One approach where there are 2 classes is to use the area under ROC curve to quantify predictor relevance.  
+
+# 18.3 | Other Approaches 
+
+The *Relief* algorithm is a generic method for quantifying predictor importance. It was originally developed for classification problems iwth 2 classes, but has been extended. It can accomodate continuous predictors as well as dummy variables and can recognize nonlinear relationships between the predictors and the outcome. It uses random selected points and their nearest neighbors to evaluate each predictor in isolation. 
+
+For a particular predictor, the score attempts to characterize the seperation between the classes in isolated sections of the data. For a randomly selected training set sample, the algorithm finds the nearest samples from both classes (called the hits and misses). For each predictor, a measure of difference in the predictor's values is calculated between the random data point and the hits and misses. 
+
+The overall score is an accumulation of these differences s.t. the score is decreased if the hit is far away from the randomly selected value, and increased if the miss is far away. The idea is that a predictor that shows a seperation between the classes should have hits nearby and missed far away. Given this, larger scores are indicative of important predictors. 
+
+# 18.4 | Computing 
+
+```{r}
+library(AppliedPredictiveModeling)
+library(caret)
+library(CORElearn)
+library(minerva) 
+# install.packages("minerva")
+library(pROC) 
+library(randomForest)
+```
+
+# Numeric Outcomes 
+
+To estimate the correlations between the predictors and the outcome, the cor function is used
+
+```{r}
+data(solubility)
+
+cor(solTrainXtrans$NumCarbon, solTrainY)
+```
+
+To get results for all the numeric predictors, the apply function can be used to make the same calculations across many columns 
+
+```{r}
+# determine which columns have the string "FP" in the name and exclude these to get numeric predictors 
+fpCols <- grepl("FP", names(solTrainXtrans)) 
+
+# exclude these to get the numeric predictor names 
+numericPreds <- names(solTrainXtrans)[!fpCols]
+
+# get correlation values 
+corrValues <- apply(solTrainXtrans[, numericPreds], 
+                    MARGIN = 2, FUN = function(x, y) cor(x, y), y = solTrainY)
+head(corrValues)
+```
+
+To obtain the rank correlation, the corr function has an option method = "spearman" 
+
+The loess smoother can be accessed with the loess function in the stats library. The formula method is used to specify the model: 
+
+```{r}
+# make loess 
+smoother <- loess(solTrainY ~ solTrainXtrans$NumCarbon) 
+smoother
+
+# plot 
+xyplot(solTrainY ~ solTrainXtrans$NumCarbon, 
+       type = c("p", "smooth"), 
+       xlab = "# Carbons", 
+       ylab = "Solubility")
+```
+
+The caret function filterVarImp with the nonpara = TRUE option (for nonparametric regression) creates a LOESS model for each predictor and quantifies the relationship with the outcome. 
+
+```{r}
+loessResults <- filterVarImp(x = solTrainXtrans[, numericPreds], 
+                             y = solTrainY, 
+                             nonpara = TRUE) 
+
+head(loessResults)
+```
+
+The minerva package can be used to calculate the MIC statistics between the predictors and outcomes. The mine function computes several quantities including the MIC value. 
+
+```{r}
+micValues <- mine(solTrainXtrans[, numericPreds], solTrainY)
+
+# several statistics are calculated 
+names(micValues)
+
+# view stats 
+head(micValues$MIC)
+```
+
+For categorical predictors, the simple t.test function computes the difference in means and the p value. 
+
+```{r}
+# for one predictor 
+t.test(solTrainY ~ solTrainXtrans$FP044)
+```
+
+This approach can be extended to all predictors using apply in a manner similar to the one shown above for correlations: 
+
+```{r}
+# general t test function
+getTstats <- function(x, y){
+  tTest <- t.test(y ~ x)
+  out <- c(tStat = tTest$statistic, p = tTest$p.value) 
+  out
+}
+
+tVals <- apply(solTrainXtrans[, fpCols], 
+               MARGIN = 2, 
+               FUN = getTstats, 
+               y = solTrainY)
+
+# switch the dimensions 
+tVals <- t(tVals) 
+head(tVals)
+```
+
+# Categorical Outcomes 
+
+The filterVarImp function also calculates the AUROC when the outcome variable is an R factor variable: 
+
+```{r}
+# load data 
+data(segmentationData)
+
+# create training set 
+cellData <- subset(segmentationData, Case == "Train")
+
+# null out case column 
+cellData$Case <- cellData$Cell <- NULL 
+
+# the class is in the first column 
+head(names(cellData))
+
+# get roc values 
+rocValues <- filterVarImp(x = cellData[, -1], 
+                          y = cellData$Class)
+
+# column is created for each class 
+head(rocValues)
+```
+
+This is a simple wrapper for the functions roc and auc in the pROC package. When there are three or more classes, filterVarImp will compute ROC curves for each class versus the others and then returns the largest area under the curve. 
+
+The relief statistics can be calculated using the CORElearn package. The function attrEval will calculate several versions of Relief (using the estimator option) 
+
+```{r}
+reliefValues <- attrEval(Class ~ ., data = cellData, 
+                         # there are many relief methods available. See ?attrEval
+                         estimator = "ReliefFequalK", 
+                         # number of instances tested 
+                         ReliefIterations = 50) 
+head(reliefValues)
+```
+
+From the outcome above, we see that AvgIntenCh2 is the most important predictor. 
+
+This function can also be used the calculate the gain ratio, Gini Index, and other scores. To use a permutation approach to investigate the observed values of the ReliefF statistic, the APM package has a function permuteRelief: 
+
+```{r}
+perm <- permuteRelief(x = cellData[, -1], 
+                      y = cellData$Class, 
+                      nperm = 500, 
+                      estimator = "ReliefFequalK", 
+                      ReliefIterations = 50)
+
+# the reliefF scores are contained in a sub object called permutations 
+head(perm$permutations) 
+
+# plot in a histogram 
+histogram(~ value | Predictor, 
+          data = perm$permutations)
+```
+
+Also the standardized versions of the scores are in a subobject called standardized and represent the number of standard deviations that the observed ReliefF values (i.e. without permuting) are from the center of the permuted distribution: 
+
+```{r}
+head(perm$standardized)
+```
+
+The MIC statistic can be computed as before, but with a binary dummy variable encoding of the classes: 
+
+```{r}
+micValues <- mine(x = cellData[, -1], 
+                  y = ifelse(cellData$Class == "PS", 1, 0)) 
+head(micValues$MIC)
+```
+
+To compute the odds ratio and a statistical test of association, the fisher.test function in the stats library can be applied. For example, to calculate these statiostics for the grant objects created in section 12.7 : 
+
+```{r}
+# CODE NOT WORKING. Returns p value, fishers exact test for count data, and odds ratio. Supposed to be grant application data 
+Sp62BTable <- table(cellData[pre2008, "Sponsor62B"], 
+                    cellData[pre2008, "Class"])
+Sp62BTable
+fisher.test(Sp62BTable)
+```
+
+When the predictor has more than two classes, a single odds ratio cannot be computed, but the p-value for association can still be utilized: 
+
+```{r}
+
+ciTable <- table(training[pre2008, "CI.1950"], 
+                 training[pre2008, "Class"]) 
+ciTable
+
+fisher.test(ciTable)
+```
+
+In some cases, Fisher's exact test may be computationally prohibitive. In these cases, the $\chi^2$ test for association can be computed: 
+
+```{r}
+DayTable <- table(training[pre2008, "Weekday"], 
+                  training[pre2008, "Class"]) 
+DayTable
+chisq.test(DayTable)
+```
+
+# Model-Based Importance Scores 
+
+Many models have built in approaches for measuring the aggregate effect of the predictors on the model. The caret package contains a general class for calculating or returing these values. As of the writing (~ 2013), there are a bunch of R classes like C5.0, PART, RRf, RandomForest, bagEarth, cubist, etc. 
+
+To illustrate, heres a random forest model fit to the cell segmentation data: 
+
+```{r}
+set.seed(791)
+rfImp <- randomForest(Class ~ ., data = cellData, ntree = 2000, importance = TRUE)
+
+# importance returns the relevant metric. The varImp function standardized across models 
+head(varImp(rfImp))
+```
+
+When using the train function, the varImp function executes the appropriate code based on the value of the method argument. When the model doesn't have a builtin function for measuring importances, train employs a more general approach. 
+
